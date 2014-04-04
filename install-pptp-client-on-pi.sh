@@ -4,19 +4,14 @@ set -eo pipefail
 
 if [[ "$(id -u)" != 0 ]]; then
     sudo INSTALL_TRACE=$INSTALL_TRACE \
-         PPTP_SERVER=$PPTP_SERVER \
-         PPTP_USERNAME=$PPTP_USERNAME \
-         PPTP_PASSWORD=$PPTP_PASSWORD \
+         PPTP_TUNNEL=$PPTP_TUNNEL \
          "$0" "$@"
     exit 0
 fi
 
 show_help() {
-    cat <<EOF
-export PPTP_SERVER=youvpnhost.com
-export PPTP_USERNAME=YourVpnUsername
-export PPTP_PASSWORD=YourVpnPassword
-EOF
+    update-vpnpirc
+    echo Please edit the file "'$VPNPIRC'" first.
     exit 1
 }
 
@@ -48,25 +43,28 @@ overwrite-to() {
     cat > "$1"
 }
 
-VPNPIRC=$HOME/.vpnpirc
-
 update-vpnpirc() {
     cat > $VPNPIRC <<EOF
 # $(date '+%F %T')
-export PPTP_SERVER=$PPTP_SERVER
-export PPTP_USERNAME=$PPTP_USERNAME
-export PPTP_PASSWORD=$PPTP_PASSWORD
-export PPTP_TUNNEL=$PPTP_TUNNEL
-export PPTP_REMOTENAME=$PPTP_REMOTENAME
-export PI_WIFI_SSID=$PI_WIFI_SSID
-export PI_WIFI_PASS=$PI_WIFI_PASS
+export PPTP_SERVER="$PPTP_SERVER"
+export PPTP_USERNAME="$PPTP_USERNAME"
+export PPTP_PASSWORD="$PPTP_PASSWORD"
+export PPTP_REMOTENAME="$PPTP_REMOTENAME"
+export PI_WIFI_SSID="$PI_WIFI_SSID"
+export PI_WIFI_PASS="$PI_WIFI_PASS"
+export VPN_PID="$VPN_PID"
+export VPN_LOG="$VPN_LOG"
+export VPN_CONTROL="${VPN_CONTROL}"
+export PPP_OPTIONS="${PPP_OPTIONS}"
 EOF
+    chmod go-rwx $VPNPIRC
 }
 
 load-vpnpirc() {
-    if [[ -f $VPNPIRC ]]; then
-        source $VPNPIRC
+    if [[ ! -f $VPNPIRC ]]; then
+        touch $VPNPIRC
     fi
+    source $VPNPIRC
 }
 
 #  ___________
@@ -79,21 +77,33 @@ load-vpnpirc() {
 #                 ||     ||
 #
 
+
+PPTP_TUNNEL=${PPTP_TUNNEL:-vpnpi}
+VPNPIRC=/etc/vpn-${PPTP_TUNNEL}-rc
+
 load-vpnpirc
+
+PPTP_REMOTENAME=${PPTP_REMOTENAME:-pptpd}
+PI_WIFI_SSID=${PI_WIFI_SSID:-0dd3-Pi}
+PI_WIFI_PASS=${PI_WIFI_PASS:-w31c0m320dd3}
+VPN_PID=${VPN_PID:-/run/vpn.pid}
+VPN_LOG=${VPN_LOG:-/run/vpn.log}
+VPN_CONTROL=${VPN_CONTROL:-/run/vpn.ctl}
+PPP_OPTIONS=${PPP_OPTIONS:-debug dump logfd 2}
+
+TIMESTAMP=$(date '+%Y%m%d-%Hh%Mm%Ss')
+
+####
 
 test -z "$PPTP_SERVER"   && show_help
 test -z "$PPTP_USERNAME" && show_help
 test -z "$PPTP_PASSWORD" && show_help
 
-PPTP_TUNNEL=${PPTP_TUNNEL:-vpnpi}
-PPTP_REMOTENAME=${PPTP_REMOTENAME:-pptpd}
-PI_WIFI_SSID=${PI_WIFI_SSID:-0dd3-Pi}
-PI_WIFI_PASS=${PI_WIFI_PASS:-w31c0m320dd3}
-TIMESTAMP=$(date '+%Y%m%d-%Hh%Mm%Ss')
-
 PPTP_PEER=/etc/ppp/peers/$PPTP_TUNNEL
 if [[ -f $PPTP_PEER ]]; then
     poff $PPTP_TUNNEL >/dev/null || true
+    echo stop > $VPN_CONTROL
+    [[ -f $VPN_PID ]] && rm -f $VPN_PID
     sleep 3
 fi
 
@@ -120,7 +130,6 @@ remotename $PPTP_REMOTENAME
 require-mppe-128
 file /etc/ppp/options.pptp
 ipparam $PPTP_TUNNEL
-persist
 EOF
 
 # debug
@@ -147,9 +156,6 @@ overwrite-to /etc/dnsmasq.d/resolv <<EOF
 resolv-file=/etc/resolv.dnsmasq
 EOF
 
-## TODO autostart ppp
-#make-backup /etc/network/interfaces
-
 PPTP_UP_SCRIPT=/etc/ppp/ip-up.d/00-$PPTP_TUNNEL
 PPTP_DOWN_SCRIPT=/etc/ppp/ip-down.d/00-$PPTP_TUNNEL
 
@@ -158,12 +164,12 @@ overwrite-to $PPTP_UP_SCRIPT <<EOF
 # pppd ip-up script for all-to-tunnel routing
 # This script is called with the following arguments:
 #    Arg  Name                          Example
-#    $1   Interface name                ppp0
-#    $2   The tty                       ttyS1
-#    $3   The link speed                38400
-#    $4   Local IP number               12.34.56.78
-#    $5   Peer  IP number               12.34.56.99
-#    $6   Optional "ipparam" value      foo
+#    \$1   Interface name                ppp0
+#    \$2   The tty                       ttyS1
+#    \$3   The link speed                38400
+#    \$4   Local IP number               12.34.56.78
+#    \$5   Peer  IP number               12.34.56.99
+#    \$6   Optional "ipparam" value      foo
 
 set -e
 
@@ -185,6 +191,8 @@ test -z "\${TUNNEL_IFACE}" && TUNNEL_IFACE=\${PPP_IFACE}
 if [ "\${CONNECTION}" = "${PPTP_TUNNEL}" ] ; then
     set +e
 
+    service dnsmasq restart
+
     ## direct tunnelled packets to the tunnel server
     #route add -host \${SERVER} dev \${PRIMARY_IFACE}
 
@@ -199,12 +207,12 @@ overwrite-to $PPTP_DOWN_SCRIPT <<EOF
 # pppd ip-down script for all-to-tunnel routing
 # This script is called with the following arguments:
 #    Arg  Name                          Example
-#    $1   Interface name                ppp0
-#    $2   The tty                       ttyS1
-#    $3   The link speed                38400
-#    $4   Local IP number               12.34.56.78
-#    $5   Peer  IP number               12.34.56.99
-#    $6   Optional "ipparam" value      foo
+#    \$1   Interface name                ppp0
+#    \$2   The tty                       ttyS1
+#    \$3   The link speed                38400
+#    \$4   Local IP number               12.34.56.78
+#    \$5   Peer  IP number               12.34.56.99
+#    \$6   Optional "ipparam" value      foo
 
 set -e
 
@@ -246,19 +254,75 @@ export PATH=\$PATH:/sbin:/usr/sbin
 EOF
 chmod +x /etc/profile.d/sbin
 
-overwrite-to /usr/sbin/start-vpn <<EOF
-sudo pon $PPTP_TUNNEL updetach
+overwrite-to /usr/sbin/vpn-start-$PPTP_TUNNEL <<EOF
+#!/bin/bash
+[[ "\$VPN_CONTROL_TRACE" ]] && set -x
+
+if [[ \$(id -u) != 0 ]]; then
+    sudo VPN_CONTROL_TRACE=\$VPN_CONTROL_TRACE "\$0" "\$@"
+    exit 0
+fi
+
+source $VPNPIRC
+
+start_vpn_daemon() {
+    while true; do
+        echo \$(date) Starting VPN: ${PPTP_TUNNEL}...
+        pon ${PPTP_TUNNEL} nodetach \$PPP_OPTIONS
+        echo \$(date) VPN: ${PPTP_TUNNEL} stoped.
+        test -e \$VPN_CONTROL || touch \$VPN_CONTROL
+        if [[ "\$(< \$VPN_CONTROL)" == "stop" ]]; then
+            :> \$VPN_CONTROL
+            echo "\$0 exit!"
+            break
+        fi
+        sleep 1 || break;
+    done
+}
+
+case "\$1" in
+    run)
+        cd /tmp
+        echo \$\$ > \$VPN_PID
+        start_vpn_daemon
+        rm \$VPN_PID
+        ;;
+    log)
+        tail -f \$VPN_LOG
+        ;;
+    '')
+        if [[ -e "\$VPN_PID" ]]; then
+            echo "\$VPN_PID exists, stop."
+            exit 1
+        fi
+        nohup "\$0" run 2>&1 1> \$VPN_LOG &
+        ;;
+    *)
+        echo "Usage: \$0"
+        ;;
+esac
 EOF
 
-overwrite-to /usr/sbin/start-vpn-debug <<EOF
-sudo pon $PPTP_TUNNEL debug dump logfd 2 nodetach
+overwrite-to /usr/sbin/vpn-stop-${PPTP_TUNNEL} <<EOF
+#!/bin/bash
+[[ "\$VPN_CONTROL_TRACE" ]] && set -x
+
+if [[ \$(id -u) != 0 ]]; then
+    sudo VPN_CONTROL_TRACE=\$VPN_CONTROL_TRACE "\$0" "\$@"
+    exit 0
+fi
+
+source $VPNPIRC
+
+echo -n "Stopping VPN: ${PPTP_TUNNEL}... "
+
+echo stop > \$VPN_CONTROL
+poff ${PPTP_TUNNEL}
+
+echo Done.
 EOF
 
-overwrite-to /usr/sbin/stop-vpn <<EOF
-sudo poff $PPTP_TUNNEL
-EOF
-
-chmod +x /usr/sbin/{start,stop}-vpn /usr/sbin/start-vpn-debug
+chmod +x /usr/sbin/vpn-{start,stop}-${PPTP_TUNNEL}
 
 overwrite-to /etc/resolv.conf <<EOF
 nameserver 8.8.8.8
@@ -302,21 +366,19 @@ dhcp-range=10.72.74.64,10.72.74.89,12h
 dhcp-option=option:router,10.72.74.1
 EOF
 
-make-backup /etc/rc.local
-sed -i -e '/exit 0/d' /etc/rc.local
 append-to /etc/rc.local <<EOF
+hostapd -B /etc/hostapd/hostapd.conf
 
-start-vpn
+vpn-start-${PPTP_TUNNEL}
 
 echo 1 > /proc/sys/net/ipv4/ip_forward
 iptables -t nat -A POSTROUTING -o ppp0 -j MASQUERADE
 iptables -A FORWARD -i eth0 -o ppp0 -m state --state RELATED,ESTABLISHED -j ACCEPT
 iptables -A FORWARD -i wlan0 -o ppp0 -j ACCEPT
 
-hostapd -B /etc/hostapd/hostapd.conf
-
-exit 0
 EOF
+
+sed -i -e '/^exit /d' /etc/rc.local
 
 ############################
 
@@ -328,8 +390,9 @@ append-to /etc/motd <<EOF
                 ||----w |
                 ||     ||
 
-Start VPN         : start-vpn
-Stop VPN          : stop-vpn
+Start VPN         : vpn-start-${PPTP_TUNNEL}
+Stop VPN          : vpn-stop-${PPTP_TUNNEL}
+Show VPN logs     : vpn-start-${PPTP_TUNNEL} log
 Add China routes  : add-china-routes
 Del China routes  : del-china-routes
 Show route tables : ip route show
