@@ -179,6 +179,9 @@ PRIMARY_IFACE=eth0
 # address of tunnel server
 SERVER=$PPTP_SERVER
 
+# local ip
+LOCAL_IP=\$4
+
 # provided by pppd: string to identify connection aka ipparam option
 CONNECTION=\$6
 test -z "\${CONNECTION}" && CONNECTION=\${PPP_IPPARAM}
@@ -198,7 +201,7 @@ if [ "\${CONNECTION}" = "${PPTP_TUNNEL}" ] ; then
 
     # direct all other packets into the tunnel
     route del default \${PRIMARY_IFACE}
-    route add default dev \${TUNNEL_IFACE}
+    route add default gw \$LOCAL_IP dev \${TUNNEL_IFACE}
 fi
 EOF
 
@@ -222,6 +225,9 @@ PRIMARY_IFACE=eth0
 # address of tunnel server
 SERVER=$PPTP_SERVER
 
+# local gateway
+LOCAL_GW=\$(ip route show | grep '^$(echo "$PPTP_SERVER" | sed -e 's,\.,\\.,g')' | awk '{print \$3}')
+
 # provided by pppd: string to identify connection aka ipparam option
 CONNECTION=\$6
 test -z "\${CONNECTION}" && CONNECTION=\${PPP_IPPARAM}
@@ -236,14 +242,14 @@ if [ "\${CONNECTION}" = "${PPTP_TUNNEL}" ] ; then
 
     # direct packets back to the original interface
     route del default \${TUNNEL_IFACE}
-    route add default dev \${PRIMARY_IFACE}
+    route add default gw \$LOCAL_GW dev \${PRIMARY_IFACE}
 fi
 EOF
 
 chmod +x $PPTP_UP_SCRIPT $PPTP_DOWN_SCRIPT
 
 for F in add-china-routes del-china-routes; do
-    curl --silent -Lk https://github.com/chaifeng/hairy-robot/raw/master/$F > $F
+    [[ -f "$F" ]] || curl --silent -Lk https://github.com/chaifeng/hairy-robot/raw/master/$F > $F
 done
 
 cp -f {add,del}-china-routes /usr/bin/
